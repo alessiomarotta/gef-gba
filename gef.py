@@ -553,29 +553,31 @@ class Address:
 
     def __str__(self) -> str:
         value = format_address(self.value)
-        code_color = gef.config["theme.address_code"]
-        stack_color = gef.config["theme.address_stack"]
-        heap_color = gef.config["theme.address_heap"]
-        if self.is_in_text_segment():
-            return Color.colorify(value, code_color)
-        if self.is_in_heap_segment():
-            return Color.colorify(value, heap_color)
-        if self.is_in_stack_segment():
-            return Color.colorify(value, stack_color)
+        rom0_color = gef.config["theme.address_rom0"]
+        iwram_color = gef.config["theme.address_iwram"]
+        ewram_color = gef.config["theme.address_ewram"]
+        if self.is_in_rom0():
+            return Color.colorify(value, rom0_color)
+        if self.is_in_ewram():
+            return Color.colorify(value, ewram_color)
+        if self.is_in_iwram():
+            return Color.colorify(value, iwram_color)
         return value
 
     def __int__(self) -> int:
         return self.value
 
-    def is_in_text_segment(self) -> bool:
-        return (hasattr(self.info, "name") and ".text" in self.info.name) or \
-            (hasattr(self.section, "path") and get_filepath() == self.section.path and self.section.is_executable())
+    def is_in_bios(self) -> bool:
+        return hasattr(self.section, "name") and "BIOS" == self.section.name
 
-    def is_in_stack_segment(self) -> bool:
-        return hasattr(self.section, "path") and "[stack]" == self.section.path
+    def is_in_rom0(self) -> bool:
+        return hasattr(self.section, "name") and "ROM0" == self.section.name
 
-    def is_in_heap_segment(self) -> bool:
-        return hasattr(self.section, "path") and "[heap]" == self.section.path
+    def is_in_iwram(self) -> bool:
+        return hasattr(self.section, "name") and "IWRAM" == self.section.name
+
+    def is_in_ewram(self) -> bool:
+        return hasattr(self.section, "name") and "EWRAM" == self.section.name
 
     def dereference(self) -> Optional[int]:
         addr = align_address(int(self.value))
@@ -584,7 +586,7 @@ class Address:
 
     @property
     def valid(self) -> bool:
-        return any(map(lambda x: x.page_start <= self.value < x.page_end, gef.memory.maps))
+        return any(map(lambda x: x.start <= self.value < x.end, gef.memory.maps))
 
 
 class Permission(enum.Flag):
@@ -624,12 +626,10 @@ class Section:
     """GEF representation of process memory sections."""
 
     def __init__(self, **kwargs: Any) -> None:
-        self.page_start: int = kwargs.get("page_start", 0)
-        self.page_end: int = kwargs.get("page_end", 0)
-        self.offset: int = kwargs.get("offset", 0)
+        self.start: int = kwargs.get("start", 0)
+        self.end: int = kwargs.get("end", 0)
         self.permission: Permission = kwargs.get("permission", Permission(0))
-        self.inode: int = kwargs.get("inode", 0)
-        self.path: str = kwargs.get("path", "")
+        self.name: str = kwargs.get("name", "")
         return
 
     def is_readable(self) -> bool:
@@ -643,17 +643,12 @@ class Section:
 
     @property
     def size(self) -> int:
-        if self.page_end is None or self.page_start is None:
+        if self.end is None or self.start is None:
             return -1
-        return self.page_end - self.page_start
-
-    @property
-    def realpath(self) -> str:
-        # when in a `gef-remote` session, realpath returns the path to the binary on the local disk, not remote
-        return self.path if gef.session.remote is None else f"/tmp/gef/{gef.session.remote:d}/{self.path}"
+        return self.end - self.start
 
     def __str__(self) -> str:
-        return (f"Section(page_start={self.page_start:#x}, page_end={self.page_end:#x}, "
+        return (f"Section(start={self.start:#x}, end={self.end:#x}, "
                 f"permissions={self.permission!s})")
 
 
@@ -1462,8 +1457,8 @@ def capstone_disassemble(location: int, nb_insn: int, **kwargs: Any) -> Generato
     cs          = capstone.Cs(arch, mode)
     cs.detail   = True
 
-    page_start  = align_address_to_page(location)
-    offset      = location - page_start
+    start       = align_address_to_page(location)
+    offset      = location - start
     pc          = gef.arch.pc
 
     skip       = int(kwargs.get("skip", 0))
@@ -1601,7 +1596,7 @@ def flags_to_human(reg_value: int, value_table: Dict[int, str]) -> str:
 @lru_cache()
 def get_section_base_address(name: str) -> Optional[int]:
     section = process_lookup_path(name)
-    return section.page_start if section else None
+    return section.start if section else None
 
 
 @lru_cache()
@@ -2102,7 +2097,7 @@ def process_lookup_address(address: int) -> Optional[Section]:
         return None
 
     for sect in gef.memory.maps:
-        if sect.page_start <= address < sect.page_end:
+        if sect.start <= address < sect.end:
             return sect
 
     return None
@@ -2877,7 +2872,7 @@ class FormatStringBreakpoint(gdb.Breakpoint):
             msg.append(Color.colorify("Format string helper", "yellow bold"))
             msg.append(f"Possible insecure format string: {self.location}('{ptr}' {RIGHT_ARROW} {addr.value:#x}: '{content}')")
             msg.append(f"Reason: Call to '{self.location}()' with format string argument in position "
-                       f"#{self.num_args:d} is in page {addr.section.page_start:#x} ({name}) that has write permission")
+                       f"#{self.num_args:d} is in page {addr.section.start:#x} ({name}) that has write permission")
             push_context_message("warn", "\n".join(msg))
             return True
 
@@ -3758,9 +3753,9 @@ class GefThemeCommand(GenericCommand):
         self["dereference_register_value"] = ("bold blue", "Color of dereferenced register")
         self["registers_register_name"] = ("blue", "Color of the register name in the register window")
         self["registers_value_changed"] = ("bold red", "Color of the changed register in the register window")
-        self["address_stack"] = ("pink", "Color to use when a stack address is found")
-        self["address_heap"] = ("green", "Color to use when a heap address is found")
-        self["address_code"] = ("red", "Color to use when a code address is found")
+        self["address_iwram"] = ("pink", "Color to use when a stack address is found")
+        self["address_ewram"] = ("green", "Color to use when a heap address is found")
+        self["address_rom0"] = ("red", "Color to use when a code address is found")
         self["source_current_line"] = ("green", "Color to use for the current code line in the source window")
         return
 
@@ -4199,9 +4194,9 @@ class ScanSectionCommand(GenericCommand):
 
         for sect in gef.memory.maps:
             if haystack in sect.path:
-                haystack_sections.append((sect.page_start, sect.page_end, os.path.basename(sect.path)))
+                haystack_sections.append((sect.start, sect.end, os.path.basename(sect.path)))
             if needle in sect.path:
-                needle_sections.append((sect.page_start, sect.page_end))
+                needle_sections.append((sect.start, sect.end))
 
         step = gef.arch.ptrsize
         unpack = u32 if step == 4 else u64
@@ -4243,7 +4238,7 @@ class SearchPatternCommand(GenericCommand):
         if section.path:
             title += f"'{Color.blueify(section.path)}'"
 
-        title += f"({section.page_start:#x}-{section.page_end:#x})"
+        title += f"({section.start:#x}-{section.end:#x})"
         title += f", permission={section.permission}"
         ok(title)
         return
@@ -4302,8 +4297,8 @@ class SearchPatternCommand(GenericCommand):
             if section.path == "[vvar]": continue
             if not section_name in section.path: continue
 
-            start = section.page_start
-            end = section.page_end - 1
+            start = section.start
+            end = section.end - 1
             old_section = None
 
             for loc in self.search_pattern_by_address(pattern, start, end):
@@ -4556,21 +4551,21 @@ def reset():
                 # this section is for GDB only, skip it
                 continue
 
-            page_start = sect.page_start
-            page_end   = sect.page_end
+            start = sect.start
+            end   = sect.end
             size       = sect.size
             perm       = sect.permission
 
-            content += f"    # Mapping {sect.path}: {page_start:#x}-{page_end:#x}\n"
-            content += f"    emu.mem_map({page_start:#x}, {size:#x}, {perm.value:#o})\n"
+            content += f"    # Mapping {sect.path}: {start:#x}-{end:#x}\n"
+            content += f"    emu.mem_map({start:#x}, {size:#x}, {perm.value:#o})\n"
 
             if perm & Permission.READ:
-                code = gef.memory.read(page_start, size)
-                loc = f"/tmp/gef-{fname}-{page_start:#x}.raw"
+                code = gef.memory.read(start, size)
+                loc = f"/tmp/gef-{fname}-{start:#x}.raw"
                 with open(loc, "wb") as f:
                     f.write(bytes(code))
 
-                content += f"    emu.mem_write({page_start:#x}, open('{loc}', 'rb').read())\n"
+                content += f"    emu.mem_write({start:#x}, open('{loc}', 'rb').read())\n"
                 content += "\n"
 
         content += "    emu.hook_add(unicorn.UC_HOOK_CODE, code_hook)\n"
@@ -5085,7 +5080,7 @@ class RopperCommand(GenericCommand):
             argv.append("--file")
             argv.append(path)
             argv.append("-I")
-            argv.append(f"{sect.page_start:#x}")
+            argv.append(f"{sect.start:#x}")
 
         import readline
         # ropper set up own autocompleter after which gdb/gef autocomplete don't work
@@ -5378,7 +5373,7 @@ class EntryPointBreakCommand(GenericCommand):
         unhide_context()
         gdb.execute("set stop-on-solib-events 0")
         vmmap = gef.memory.maps
-        base_address = [x.page_start for x in vmmap if x.path == get_filepath()][0]
+        base_address = [x.start for x in vmmap if x.path == get_filepath()][0]
         return self.set_init_tbreak(base_address + addr)
 
 
@@ -5469,16 +5464,16 @@ class ContextCommand(GenericCommand):
         if gef.config["gef.disable_color"] is True:
             return
         str_color = gef.config["theme.dereference_string"]
-        code_addr_color = gef.config["theme.address_code"]
-        stack_addr_color = gef.config["theme.address_stack"]
-        heap_addr_color = gef.config["theme.address_heap"]
+        rom0_addr_color = gef.config["theme.address_rom0"]
+        iwram_addr_color = gef.config["theme.address_iwram"]
+        ewram_addr_color = gef.config["theme.address_ewram"]
         changed_register_color = gef.config["theme.registers_value_changed"]
 
         gef_print("[ Legend: {} | {} | {} | {} | {} ]".format(Color.colorify("Modified register", changed_register_color),
-                                                              Color.colorify("Code", code_addr_color),
-                                                              Color.colorify("Heap", heap_addr_color),
-                                                              Color.colorify("Stack", stack_addr_color),
-                                                              Color.colorify("String", str_color)))
+                                                              Color.colorify("String", str_color),
+                                                              Color.colorify("ROM0", rom0_addr_color),
+                                                              Color.colorify("EWRAM", ewram_addr_color),
+                                                              Color.colorify("IWRAM", iwram_addr_color)))
         return
 
     @only_if_gdb_running
@@ -6489,6 +6484,10 @@ def dereference_from(addr: int) -> List[str]:
 
         max_recursion -= 1
 
+        # Don't dereference BIOS addresses
+        if addr.is_in_bios():
+            break
+
         # Is this value a pointer or a value?
         # -- If it's a pointer, dereference
         deref = addr.dereference()
@@ -6505,7 +6504,7 @@ def dereference_from(addr: int) -> List[str]:
 
         # -- Otherwise try to parse the value
         if addr.section:
-            if addr.section.is_executable() and addr.is_in_text_segment() and not is_ascii_string(addr.value):
+            if addr.is_in_rom0() and not is_ascii_string(addr.value):
                 insn = gef_current_instruction(addr.value)
                 insn_str = f"{insn.location} {insn.mnemonic} {', '.join(insn.operands)}"
                 msg.append(Color.colorify(insn_str, code_color))
@@ -6672,6 +6671,68 @@ class ResetCacheCommand(GenericCommand):
 
 
 @register_command
+class MMapCommand(GenericCommand):
+    """Display a comprehensive layout of the memory mapping. If a filter argument, GEF will
+    filter out the mapping whose name do not match that filter."""
+
+    _cmdline_ = "mmap"
+    _syntax_  = f"{_cmdline_} [FILTER]"
+    _example_ = f"{_cmdline_} libc"
+
+    @only_if_gdb_running
+    def do_invoke(self, argv: List[str]) -> None:
+        vmmap = gef.memory.maps
+        if not vmmap:
+            err("No address mapping information found")
+            return
+
+        color = gef.config["theme.table_heading"]
+
+        headers = ["Start", "End", "Perm", "Name"]
+        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<3s} {:s}".format(*headers, w=gef.arch.ptrsize*2+3), color))
+
+        for entry in vmmap:
+            if not argv:
+                self.print_entry(entry)
+                continue
+            if argv[0] in entry.name:
+                self.print_entry(entry)
+            elif self.is_integer(argv[0]):
+                addr = int(argv[0], 0)
+                if addr >= entry.start and addr < entry.end:
+                    self.print_entry(entry)
+        return
+
+    def print_entry(self, entry: Section) -> None:
+        line_color = ""
+        if entry.name == "ROM0":
+            line_color = gef.config["theme.address_rom0"]
+        elif entry.name == "IWRAM":
+            line_color = gef.config["theme.address_iwram"]
+        elif entry.name == "EWRAM":
+            line_color = gef.config["theme.address_ewram"]
+
+        l = [
+            Color.colorify(format_address(entry.start), line_color),
+            Color.colorify(format_address(entry.end), line_color)
+        ]
+        l.append(Color.colorify(str(entry.permission), line_color))
+
+        l.append(Color.colorify(" "+entry.name, line_color))
+        line = " ".join(l)
+
+        gef_print(line)
+        return
+
+    def is_integer(self, n: str) -> bool:
+        try:
+            int(n, 0)
+        except ValueError:
+            return False
+        return True
+
+
+@register_command
 class XFilesCommand(GenericCommand):
     """Shows all libraries (and sections) loaded by binary. This command extends the GDB command
     `info files`, by retrieving more information from extra sources, and providing a better
@@ -6747,11 +6808,11 @@ class XAddressInfoCommand(GenericCommand):
         info = addr.info
 
         if sect:
-            gef_print(f"Page: {format_address(sect.page_start)} {RIGHT_ARROW} "
-                      f"{format_address(sect.page_end)} (size={sect.page_end-sect.page_start:#x})"
+            gef_print(f"Page: {format_address(sect.start)} {RIGHT_ARROW} "
+                      f"{format_address(sect.end)} (size={sect.end-sect.start:#x})"
                       f"\nPermissions: {sect.permission}"
                       f"\nPathname: {sect.path}"
-                      f"\nOffset (from page): {addr.value-sect.page_start:#x}"
+                      f"\nOffset (from page): {addr.value-sect.start:#x}"
                       f"\nInode: {sect.inode}")
 
         if info:
@@ -7135,8 +7196,8 @@ class GotCommand(GenericCommand):
         # getting vmmap to understand the boundaries of the main binary
         # we will use this info to understand if a function has been resolved or not.
         vmmap = gef.memory.maps
-        base_address = min(x.page_start for x in vmmap if x.path == get_filepath())
-        end_address = max(x.page_end for x in vmmap if x.path == get_filepath())
+        base_address = min(x.start for x in vmmap if x.path == get_filepath())
+        end_address = max(x.end for x in vmmap if x.path == get_filepath())
 
         # get the checksec output.
         checksec_status = checksec(get_filepath())
@@ -8233,81 +8294,24 @@ class GefMemoryManager(GefManager):
     @property
     def maps(self) -> List[Section]:
         if not self.__maps:
-            self.__maps = self.__parse_maps()
+            x = Permission.EXECUTE
+            rw = Permission.READ | Permission.WRITE
+            rx = Permission.READ | Permission.EXECUTE
+            rwx = Permission.READ | Permission.WRITE | Permission.EXECUTE
+
+            self.__maps = []
+            self.__maps += [Section(name="BIOS", start=0x00000000, end=0x00004000, permission=x)]
+            self.__maps += [Section(name="EWRAM", start=0x02000000, end=0x02040000, permission=rwx)]
+            self.__maps += [Section(name="IWRAM", start=0x03000000, end=0x03008000, permission=rwx)]
+            self.__maps += [Section(name="IO", start=0x04000000, end=0x040003ff, permission=rw)]
+            self.__maps += [Section(name="PAL", start=0x05000000, end=0x05000400, permission=rwx)]
+            self.__maps += [Section(name="VRAM", start=0x06000000, end=0x06018000, permission=rwx)]
+            self.__maps += [Section(name="OAM", start=0x07000000, end=0x07000400, permission=rwx)]
+            self.__maps += [Section(name="ROM0", start=0x08000000, end=0x0a000000, permission=rx)]
+            self.__maps += [Section(name="ROM1", start=0x0a000000, end=0x0c000000, permission=rx)]
+            self.__maps += [Section(name="ROM2", start=0x0c000000, end=0x0e000000, permission=rx)]
+            self.__maps += [Section(name="SRAM", start=0x0e000000, end=0x0e010000, permission=rwx)]
         return self.__maps
-
-    def __parse_maps(self) -> List[Section]:
-        """Return the mapped memory sections"""
-        try:
-            return list(self.__parse_procfs_maps())
-        except FileNotFoundError:
-            return list(self.__parse_gdb_info_sections())
-
-    def __parse_procfs_maps(self) -> Generator[Section, None, None]:
-        """Get the memory mapping from procfs."""
-        def open_file(path: str, use_cache: bool = False) -> IO:
-            """Attempt to open the given file, if remote debugging is active, download
-            it first to the mirror in /tmp/."""
-            if is_remote_debug() and not gef.session.qemu_mode:
-                lpath = download_file(path, use_cache)
-                if not lpath:
-                    raise IOError(f"cannot open remote path {path}")
-                path = lpath
-            return open(path, "r")
-
-        __process_map_file = f"/proc/{gef.session.pid}/maps"
-        with open_file(__process_map_file, use_cache=False) as fd:
-            for line in fd:
-                line = line.strip()
-                addr, perm, off, _, rest = line.split(" ", 4)
-                rest = rest.split(" ", 1)
-                if len(rest) == 1:
-                    inode = rest[0]
-                    pathname = ""
-                else:
-                    inode = rest[0]
-                    pathname = rest[1].lstrip()
-
-                addr_start, addr_end = [int(x, 16) for x in addr.split("-")]
-                off = int(off, 16)
-                perm = Permission.from_process_maps(perm)
-                inode = int(inode)
-                yield Section(page_start=addr_start,
-                            page_end=addr_end,
-                            offset=off,
-                            permission=perm,
-                            inode=inode,
-                            path=pathname)
-        return
-
-    def __parse_gdb_info_sections(self) -> Generator[Section, None, None]:
-        """Get the memory mapping from GDB's command `maintenance info sections` (limited info)."""
-        stream = StringIO(gdb.execute("maintenance info sections", to_string=True))
-
-        for line in stream:
-            if not line:
-                break
-
-            try:
-                parts = [x for x in line.split()]
-                addr_start, addr_end = [int(x, 16) for x in parts[1].split("->")]
-                off = int(parts[3][:-1], 16)
-                path = parts[4]
-                perm = Permission.from_info_sections(parts[5:])
-                yield Section(
-                    page_start=addr_start,
-                    page_end=addr_end,
-                    offset=off,
-                    permission=perm,
-                    inode="",
-                    path=path
-                )
-
-            except IndexError:
-                continue
-            except ValueError:
-                continue
-        return
 
 
 class GefSetting:
