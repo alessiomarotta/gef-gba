@@ -1748,7 +1748,7 @@ class ARM(Architecture):
     }
     function_parameters = ["$r0", "$r1", "$r2", "$r3"]
     syscall_register = "$r7"
-    syscall_instructions = ["swi 0x0", "swi NR"]
+    syscall_instructions = ["swi NR"]
     endianness = Endianness.LITTLE_ENDIAN
 
     def is_thumb(self) -> bool:
@@ -1773,7 +1773,7 @@ class ARM(Architecture):
 
     @property
     def ptrsize(self) -> int:
-        return 2 if self.is_thumb() else 4
+        return 4
 
     def is_call(self, insn: Instruction) -> bool:
         mnemo = insn.mnemonic
@@ -2519,7 +2519,7 @@ def align_address(address: int) -> int:
     if gef.arch.ptrsize == 4:
         return address & 0xFFFFFFFF
 
-    return address & 0xFFFFFFFFFFFFFFFF
+    return address & 0xFFFF
 
 
 def align_address_to_size(address: int, align: int) -> int:
@@ -6261,7 +6261,7 @@ def dereference_from(addr: int) -> List[str]:
                     break
 
         # if not able to parse cleanly, simply display and break
-        val = "{:#0{ma}x}".format(int(deref & 0xFFFFFFFFFFFFFFFF), ma=(gef.arch.ptrsize * 2 + 2))
+        val = "{:#0{ma}x}".format(int(deref & 0xFFFFFFFF), ma=(gef.arch.ptrsize * 2 + 2))
         msg.append(val)
         break
 
@@ -6384,7 +6384,7 @@ class MMapCommand(GenericCommand):
         color = gef.config["theme.table_heading"]
 
         headers = ["Start", "End", "Perm", "Name"]
-        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<3s} {:s}".format(*headers, w=11), color))
+        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<3s} {:s}".format(*headers, w=gef.arch.ptrsize*2+3), color))
 
         for entry in vmmap:
             if not argv:
@@ -6442,7 +6442,7 @@ class XFilesCommand(GenericCommand):
     def do_invoke(self, argv: List[str]) -> None:
         color = gef.config["theme.table_heading"]
         headers = ["Start", "End", "Name", "File"]
-        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<21s} {:s}".format(*headers, w=11), color))
+        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<21s} {:s}".format(*headers, w=gef.arch.ptrsize*2+3), color))
 
         filter_by_file = argv[0] if argv and argv[0] else None
         filter_by_name = argv[1] if len(argv) > 1 and argv[1] else None
