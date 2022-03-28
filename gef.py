@@ -2540,13 +2540,7 @@ def clear_screen(tty: str = "") -> None:
 
 def format_address(addr: int) -> str:
     """Format the address according to its size."""
-    memalign_size = gef.arch.ptrsize
-    addr = align_address(addr)
-
-    if memalign_size == 4:
-        return f"{addr:#08x}"
-
-    return f"{addr:#016x}"
+    return f"{addr:#010x}"
 
 
 def format_address_spaces(addr: int, left: bool = True) -> str:
@@ -6435,7 +6429,7 @@ class MMapCommand(GenericCommand):
         color = gef.config["theme.table_heading"]
 
         headers = ["Start", "End", "Perm", "Name"]
-        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<3s} {:s}".format(*headers, w=gef.arch.ptrsize*2+3), color))
+        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<3s} {:s}".format(*headers, w=11), color))
 
         for entry in vmmap:
             if not argv:
@@ -6493,7 +6487,7 @@ class XFilesCommand(GenericCommand):
     def do_invoke(self, argv: List[str]) -> None:
         color = gef.config["theme.table_heading"]
         headers = ["Start", "End", "Name", "File"]
-        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<21s} {:s}".format(*headers, w=gef.arch.ptrsize*2+3), color))
+        gef_print(Color.colorify("{:<{w}s}{:<{w}s}{:<21s} {:s}".format(*headers, w=11), color))
 
         filter_by_file = argv[0] if argv and argv[0] else None
         filter_by_name = argv[1] if len(argv) > 1 and argv[1] else None
@@ -6554,12 +6548,11 @@ class XAddressInfoCommand(GenericCommand):
         info = addr.info
 
         if sect:
-            gef_print(f"Page: {format_address(sect.start)} {RIGHT_ARROW} "
+            gef_print(f"Section: {format_address(sect.start)} {RIGHT_ARROW} "
                       f"{format_address(sect.end)} (size={sect.end-sect.start:#x})"
                       f"\nPermissions: {sect.permission}"
-                      f"\nPathname: {sect.path}"
-                      f"\nOffset (from page): {addr.value-sect.start:#x}"
-                      f"\nInode: {sect.inode}")
+                      f"\nName: {sect.name}"
+                      f"\nOffset (from page): {addr.value-sect.start:#x}")
 
         if info:
             gef_print(f"Segment: {info.name} "
