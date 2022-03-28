@@ -1,0 +1,7 @@
+*.out
+*.pyc
+TAGS
+__pycache__
+.vscode
+_build
+debug.log
