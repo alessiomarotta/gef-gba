@@ -1934,25 +1934,21 @@ def copy_to_clipboard(data: str) -> None:
 
 def use_stdtype() -> str:
     if is_32bit(): return "uint32_t"
-    elif is_64bit(): return "uint64_t"
     return "uint16_t"
 
 
 def use_default_type() -> str:
     if is_32bit(): return "unsigned int"
-    elif is_64bit(): return "unsigned long"
     return "unsigned short"
 
 
 def use_golang_type() -> str:
     if is_32bit(): return "uint32"
-    elif is_64bit(): return "uint64"
     return "uint16"
 
 
 def use_rust_type() -> str:
     if is_32bit(): return "u32"
-    elif is_64bit(): return "u64"
     return "u16"
 
 
@@ -2104,10 +2100,6 @@ def process_lookup_address(address: int) -> Optional[Section]:
     if not is_alive():
         err("Process is not running")
         return None
-
-    if is_x86():
-        if is_in_x86_kernel(address):
-            return None
 
     for sect in gef.memory.maps:
         if sect.page_start <= address < sect.page_end:
@@ -2453,32 +2445,9 @@ def get_elf_headers(filename: Optional[str] = None) -> Optional[Elf]:
 
 
 @lru_cache()
-def is_64bit() -> bool:
-    """Checks if current target is 64bit."""
-    return gef.arch.ptrsize == 8
-
-
-@lru_cache()
 def is_32bit() -> bool:
     """Checks if current target is 32bit."""
     return gef.arch.ptrsize == 4
-
-
-@lru_cache()
-def is_x86_64() -> bool:
-    """Checks if current target is x86-64"""
-    return Elf.Abi.X86_64 in gef.arch.aliases
-
-
-@lru_cache()
-def is_x86_32():
-    """Checks if current target is an x86-32"""
-    return Elf.Abi.X86_32 in gef.arch.aliases
-
-
-@lru_cache()
-def is_x86() -> bool:
-    return is_x86_32() or is_x86_64()
 
 
 @lru_cache()
@@ -2620,12 +2589,6 @@ def parse_address(address: str) -> int:
     if is_hex(address):
         return int(address, 16)
     return to_unsigned_long(gdb.parse_and_eval(address))
-
-
-def is_in_x86_kernel(address: int) -> bool:
-    address = align_address(address)
-    memalign = gef.arch.ptrsize*8 - 1
-    return (address >> memalign) == 0xF
 
 
 @lru_cache()
@@ -4509,38 +4472,6 @@ class UnicornEmulateCommand(GenericCommand):
         else:
             tmp_fd, tmp_filename = tempfile.mkstemp(suffix=".py", prefix="gef-uc-")
 
-        if is_x86():
-            # need to handle segmentation (and pagination) via MSR
-            emulate_segmentation_block = """
-# from https://github.com/unicorn-engine/unicorn/blob/master/tests/regress/x86_64_msr.py
-SCRATCH_ADDR = 0xf000
-SEGMENT_FS_ADDR = 0x5000
-SEGMENT_GS_ADDR = 0x6000
-FSMSR = 0xC0000100
-GSMSR = 0xC0000101
-
-def set_msr(uc, msr, value, scratch=SCRATCH_ADDR):
-    buf = b"\\x0f\\x30"  # x86: wrmsr
-    uc.mem_map(scratch, 0x1000)
-    uc.mem_write(scratch, buf)
-    uc.reg_write(unicorn.x86_const.UC_X86_REG_RAX, value & 0xFFFFFFFF)
-    uc.reg_write(unicorn.x86_const.UC_X86_REG_RDX, (value >> 32) & 0xFFFFFFFF)
-    uc.reg_write(unicorn.x86_const.UC_X86_REG_RCX, msr & 0xFFFFFFFF)
-    uc.emu_start(scratch, scratch+len(buf), count=1)
-    uc.mem_unmap(scratch, 0x1000)
-    return
-
-def set_gs(uc, addr):    return set_msr(uc, GSMSR, addr)
-def set_fs(uc, addr):    return set_msr(uc, FSMSR, addr)
-
-"""
-
-            context_segmentation_block = """
-    emu.mem_map(SEGMENT_FS_ADDR-0x1000, 0x3000)
-    set_fs(emu, SEGMENT_FS_ADDR)
-    set_gs(emu, SEGMENT_GS_ADDR)
-"""
-
         content = """#!{pythonbin} -i
 #
 # Emulation script for "{fname}" from {start:#x} to {end:#x}
@@ -4601,9 +4532,9 @@ def reset():
            syscall_reg=gef.arch.syscall_register,
            cs_arch=cs_arch, cs_mode=cs_mode,
            ptrsize=gef.arch.ptrsize * 2 + 2,  # two hex chars per byte plus "0x" prefix
-           emu_block=emulate_segmentation_block if is_x86() else "",
+           emu_block="",
            arch=arch, mode=mode,
-           context_block=context_segmentation_block if is_x86() else "")
+           context_block="")
 
         if verbose:
             info("Duplicating registers")
@@ -4644,8 +4575,6 @@ def reset():
 
         content += "    emu.hook_add(unicorn.UC_HOOK_CODE, code_hook)\n"
         content += "    emu.hook_add(unicorn.UC_HOOK_INTR, intr_hook)\n"
-        if is_x86_64():
-            content += "    emu.hook_add(unicorn.UC_HOOK_INSN, syscall_hook, None, 1, 0, unicorn.x86_const.UC_X86_INS_SYSCALL)\n"
         content += "    return emu\n"
 
         content += """
@@ -4878,25 +4807,6 @@ class RemoteCommand(GenericCommand):
         if arch.startswith("arm"):
             gef.binary.e_machine = Elf.Abi.ARM
             gef.arch = ARM()
-        elif arch.startswith("aarch64"):
-            gef.binary.e_machine = Elf.Abi.AARCH64
-            gef.arch = AARCH64()
-        elif arch.startswith("i386:intel"):
-            gef.binary.e_machine = Elf.Abi.X86_32
-            gef.arch = X86()
-        elif arch.startswith("i386:x86-64"):
-            gef.binary.e_machine = Elf.Abi.X86_64
-            gef.binary.e_class = Elf.Class.ELF_64_BITS
-            gef.arch = X86_64()
-        elif arch.startswith("mips"):
-            gef.binary.e_machine = Elf.Abi.MIPS
-            gef.arch = MIPS()
-        elif arch.startswith("powerpc"):
-            gef.binary.e_machine = Elf.Abi.POWERPC
-            gef.arch = PowerPC()
-        elif arch.startswith("sparc"):
-            gef.binary.e_machine = Elf.Abi.SPARC
-            gef.arch = SPARC()
         else:
             raise RuntimeError(f"unsupported architecture: {arch}")
 
@@ -5197,28 +5107,19 @@ class AssembleCommand(GenericCommand):
     _cmdline_ = "assemble"
     _syntax_  = f"{_cmdline_} [-h] [--list-archs] [--mode MODE] [--arch ARCH] [--overwrite-location LOCATION] [--endian ENDIAN] [--as-shellcode] instruction;[instruction;...instruction;])"
     _aliases_ = ["asm",]
-    _example_ = (f"\n{_cmdline_} -a x86 -m 32 nop ; nop ; inc eax ; int3"
-                 f"\n{_cmdline_} -a arm -m arm add r0, r0, 1")
+    _example_ = f"\n{_cmdline_} -a arm -m arm add r0, r0, 1"
 
     valid_arch_modes = {
             # Format: ARCH = [MODES] with MODE = (NAME, HAS_LITTLE_ENDIAN, HAS_BIG_ENDIAN)
-            "ARM":     [("ARM",     True,  True),  ("THUMB",   True,  True),
-                        ("ARMV8",   True,  True),  ("THUMBV8", True,  True)],
-            "ARM64":   [("0", True,  False)],
-            "MIPS":    [("MIPS32",  True,  True),  ("MIPS64",  True,  True)],
-            "PPC":     [("PPC32",   False, True),  ("PPC64",   True,  True)],
-            "SPARC":   [("SPARC32", True,  True),  ("SPARC64", False, True)],
-            "SYSTEMZ": [("SYSTEMZ", True,  True)],
-            "X86":     [("16",      True,  False), ("32",      True,  False),
-                        ("64",      True,  False)]
+            "ARM":     [("ARM",     True,  True),  ("THUMB",   True,  True)]
         }
     valid_archs = valid_arch_modes.keys()
     valid_modes = [_ for sublist in valid_arch_modes.values() for _ in sublist]
 
     def __init__(self) -> None:
         super().__init__()
-        self["default_architecture"] = ("X86", "Specify the default architecture to use when assembling")
-        self["default_mode"] = ("64", "Specify the default architecture to use when assembling")
+        self["default_architecture"] = ("ARM", "Specify the default architecture to use when assembling")
+        self["default_mode"] = ("32", "Specify the default architecture to use when assembling")
         return
 
     def pre_load(self) -> None:
@@ -5899,24 +5800,9 @@ class ContextCommand(GenericCommand):
             if not insn.operands:
                 continue
 
-            if is_x86_32():
-                if insn.mnemonic == "push":
-                    parameter_set.add(insn.operands[0])
-            else:
-                op = "$" + insn.operands[0]
-                if op in function_parameters:
-                    parameter_set.add(op)
-
-                if is_x86_64():
-                    # also consider extended registers
-                    extended_registers = {"$rdi": ["$edi", "$di"],
-                                          "$rsi": ["$esi", "$si"],
-                                          "$rdx": ["$edx", "$dx"],
-                                          "$rcx": ["$ecx", "$cx"],
-                                         }
-                    for exreg in extended_registers:
-                        if op in extended_registers[exreg]:
-                            parameter_set.add(exreg)
+            op = "$" + insn.operands[0]
+            if op in function_parameters:
+                parameter_set.add(op)
 
         nb_argument = None
         _arch_mode = f"{gef.arch.arch.lower()}_{gef.arch.mode}"
@@ -5929,10 +5815,7 @@ class ContextCommand(GenericCommand):
                 pass
 
         if not nb_argument:
-            if is_x86_32():
-                nb_argument = len(parameter_set)
-            else:
-                nb_argument = max([function_parameters.index(p)+1 for p in parameter_set], default=0)
+            nb_argument = max([function_parameters.index(p)+1 for p in parameter_set], default=0)
 
         args = []
         for i in range(nb_argument):
