@@ -4809,7 +4809,7 @@ class DetailRegistersCommand(GenericCommand):
             if addr.valid:
                 line += str(addr)
             else:
-                line += format_address_spaces(value)
+                line += format_address(value)
             addrs = dereference_from(value)
 
             if len(addrs) > 1:
