@@ -1500,42 +1500,6 @@ def gef_execute_gdb_script(commands: str) -> None:
     return
 
 
-@lru_cache(32)
-def checksec(filename: str) -> Dict[str, bool]:
-    """Check the security property of the ELF binary. The following properties are:
-    - Canary
-    - NX
-    - PIE
-    - Fortify
-    - Partial/Full RelRO.
-    Return a dict() with the different keys mentioned above, and the boolean
-    associated whether the protection was found."""
-    readelf = gef.session.constants["readelf"]
-
-    def __check_security_property(opt: str, filename: str, pattern: str) -> bool:
-        cmd   = [readelf,]
-        cmd  += opt.split()
-        cmd  += [filename,]
-        lines = gef_execute_external(cmd, as_list=True)
-        for line in lines:
-            if re.search(pattern, line):
-                return True
-        return False
-
-    results = collections.OrderedDict()
-    results["Canary"] = __check_security_property("-s", filename, r"__stack_chk_fail") is True
-    has_gnu_stack = __check_security_property("-W -l", filename, r"GNU_STACK") is True
-    if has_gnu_stack:
-        results["NX"] = __check_security_property("-W -l", filename, r"GNU_STACK.*RWE") is False
-    else:
-        results["NX"] = False
-    results["PIE"] = __check_security_property("-h", filename, r":.*EXEC") is False
-    results["Fortify"] = __check_security_property("-s", filename, r"_chk@GLIBC") is True
-    results["Partial RelRO"] = __check_security_property("-l", filename, r"GNU_RELRO") is True
-    results["Full RelRO"] = results["Partial RelRO"] and __check_security_property("-d", filename, r"BIND_NOW") is True
-    return results
-
-
 @lru_cache()
 def get_arch() -> str:
     """Return the binary's architecture."""
@@ -1568,10 +1532,6 @@ def get_arch() -> str:
 def get_entry_point() -> Optional[int]:
     """Return the binary entry point."""
     return gef.binary.entry_point if gef.binary else None
-
-
-def is_pie(fpath: str) -> bool:
-    return checksec(fpath)["PIE"]
 
 
 @deprecated("Prefer `gef.arch.endianness == Endianness.BIG_ENDIAN`")
@@ -2670,11 +2630,6 @@ def is_syscall(instruction: Union[Instruction,int]) -> bool:
 #
 # Deprecated API
 #
-
-@deprecated("Use `gef.session.pie_breakpoints[num]`")
-def gef_get_pie_breakpoint(num: int) -> "PieVirtualBreakpoint":
-    return gef.session.pie_breakpoints[num]
-
 
 @deprecated("Use `str(gef.arch.endianness)` instead")
 def endian_str() -> str:
