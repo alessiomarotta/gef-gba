@@ -136,7 +136,6 @@ GEF_RC                                 = (pathlib.Path(os.getenv("GEF_RC")).abso
 GEF_TEMP_DIR                           = os.path.join(tempfile.gettempdir(), "gef")
 GEF_MAX_STRING_LENGTH                  = 50
 
-LIBC_HEAP_MAIN_ARENA_DEFAULT_NAME      = "main_arena"
 ANSI_SPLIT_RE                          = r"(\033\[[\d;]*m)"
 
 LEFT_ARROW                             = " \u2190 "
@@ -150,8 +149,6 @@ BP_GLYPH                               = "\u25cf"
 GEF_PROMPT                             = "gef\u27a4  "
 GEF_PROMPT_ON                          = f"\001\033[1;32m\002{GEF_PROMPT}\001\033[0m\002"
 GEF_PROMPT_OFF                         = f"\001\033[1;31m\002{GEF_PROMPT}\001\033[0m\002"
-
-PATTERN_LIBC_VERSION                   = re.compile(rb"glibc (\d+)\.(\d+)")
 
 
 gef : "Gef"                                                                 = None
@@ -2111,7 +2108,6 @@ def new_objfile_handler(_: "gdb.Event") -> None:
     """GDB event handler for new object file cases."""
     reset_all_caches()
     reset_architecture()
-    load_libc_args()
     return
 
 
@@ -2135,42 +2131,6 @@ def regchanged_handler(_: "gdb.Event") -> None:
     """GDB event handler for reg changes cases."""
     reset_all_caches()
     return
-
-
-def load_libc_args() -> bool:
-    """Load the LIBC function arguments. Returns `True` on success, `False` or an Exception otherwise."""
-    global gef
-    # load libc function arguments' definitions
-    if not gef.config["context.libc_args"]:
-        return False
-
-    path = gef.config["context.libc_args_path"]
-    if not path:
-        return False
-
-    path = pathlib.Path(path).expanduser().absolute()
-    if not path.exists():
-        raise RuntimeError("Config `context.libc_args_path` set but it's not a directory")
-
-    _arch_mode = f"{gef.arch.arch.lower()}_{gef.arch.mode}"
-    _libc_args_file = path / f"{_arch_mode}.json"
-
-    # current arch and mode already loaded
-    if _arch_mode in gef.ui.libc_args_table:
-        return True
-
-    gef.ui.libc_args_table[_arch_mode] = {}
-    try:
-        with _libc_args_file.open() as _libc_args:
-            gef.ui.libc_args_table[_arch_mode] = json.load(_libc_args)
-        return True
-    except FileNotFoundError:
-        del gef.ui.libc_args_table[_arch_mode]
-        warn(f"Config context.libc_args is set but definition cannot be loaded: file {_libc_args_file} not found")
-    except json.decoder.JSONDecodeError as e:
-        del gef.ui.libc_args_table[_arch_mode]
-        warn(f"Config context.libc_args is set but definition cannot be loaded from file {_libc_args_file}: {e}")
-    return False
 
 
 def get_terminal_size() -> Tuple[int, int]:
@@ -2823,240 +2783,6 @@ class TraceMallocBreakpoint(gdb.Breakpoint):
         _, size = gef.arch.get_ith_parameter(0)
         self.retbp = TraceMallocRetBreakpoint(size, self.name)
         return False
-
-
-class TraceMallocRetBreakpoint(gdb.FinishBreakpoint):
-    """Internal temporary breakpoint to retrieve the return value of malloc()."""
-
-    def __init__(self, size: int, name: str) -> None:
-        super().__init__(gdb.newest_frame(), internal=True)
-        self.size = size
-        self.name = name
-        self.silent = True
-        return
-
-    def stop(self) -> bool:
-        if self.return_value:
-            loc = int(self.return_value)
-        else:
-            loc = parse_address(gef.arch.return_register)
-
-        size = self.size
-        ok(f"{Color.colorify('Heap-Analysis', 'yellow bold')} - {self.name}({size})={loc:#x}")
-        check_heap_overlap = gef.config["heap-analysis-helper.check_heap_overlap"]
-
-        # pop from free-ed list if it was in it
-        if gef.session.heap_freed_chunks:
-            idx = 0
-            for item in gef.session.heap_freed_chunks:
-                addr = item[0]
-                if addr == loc:
-                    gef.session.heap_freed_chunks.remove(item)
-                    continue
-                idx += 1
-
-        # pop from uaf watchlist
-        if gef.session.heap_uaf_watchpoints:
-            idx = 0
-            for wp in gef.session.heap_uaf_watchpoints:
-                wp_addr = wp.address
-                if loc <= wp_addr < loc + size:
-                    gef.session.heap_uaf_watchpoints.remove(wp)
-                    wp.enabled = False
-                    continue
-                idx += 1
-
-        item = (loc, size)
-
-        if check_heap_overlap:
-            # seek all the currently allocated chunks, read their effective size and check for overlap
-            msg = []
-            align = gef.arch.ptrsize
-            for chunk_addr, _ in gef.session.heap_allocated_chunks:
-                current_chunk = GlibcChunk(chunk_addr)
-                current_chunk_size = current_chunk.get_chunk_size()
-
-                if chunk_addr <= loc < chunk_addr + current_chunk_size:
-                    offset = loc - chunk_addr - 2*align
-                    if offset < 0: continue # false positive, discard
-
-                    msg.append(Color.colorify("Heap-Analysis", "yellow bold"))
-                    msg.append("Possible heap overlap detected")
-                    msg.append(f"Reason {RIGHT_ARROW} new allocated chunk {loc:#x} (of size {size:d}) overlaps in-used chunk {chunk_addr:#x} (of size {current_chunk_size:#x})")
-                    msg.append(f"Writing {offset:d} bytes from {chunk_addr:#x} will reach chunk {loc:#x}")
-                    msg.append(f"Payload example for chunk {chunk_addr:#x} (to overwrite {loc:#x} headers):")
-                    msg.append("  data = 'A'*{0:d} + 'B'*{1:d} + 'C'*{1:d}".format(offset, align))
-                    push_context_message("warn", "\n".join(msg))
-                    return True
-
-        # add it to alloc-ed list
-        gef.session.heap_allocated_chunks.append(item)
-        return False
-
-
-class TraceReallocBreakpoint(gdb.Breakpoint):
-    """Track re-allocations done with realloc()."""
-
-    def __init__(self) -> None:
-        super().__init__("__libc_realloc", gdb.BP_BREAKPOINT, internal=True)
-        self.silent = True
-        return
-
-    def stop(self) -> bool:
-        _, ptr = gef.arch.get_ith_parameter(0)
-        _, size = gef.arch.get_ith_parameter(1)
-        self.retbp = TraceReallocRetBreakpoint(ptr, size)
-        return False
-
-
-class TraceReallocRetBreakpoint(gdb.FinishBreakpoint):
-    """Internal temporary breakpoint to retrieve the return value of realloc()."""
-
-    def __init__(self, ptr: int, size: int) -> None:
-        super().__init__(gdb.newest_frame(), internal=True)
-        self.ptr = ptr
-        self.size = size
-        self.silent = True
-        return
-
-    def stop(self) -> bool:
-        if self.return_value:
-            newloc = int(self.return_value)
-        else:
-            newloc = parse_address(gef.arch.return_register)
-
-        if newloc != self:
-            ok("{} - realloc({:#x}, {})={}".format(Color.colorify("Heap-Analysis", "yellow bold"),
-                                                   self.ptr, self.size,
-                                                   Color.colorify(f"{newloc:#x}", "green"),))
-        else:
-            ok("{} - realloc({:#x}, {})={}".format(Color.colorify("Heap-Analysis", "yellow bold"),
-                                                   self.ptr, self.size,
-                                                   Color.colorify(f"{newloc:#x}", "red"),))
-
-        item = (newloc, self.size)
-
-        try:
-            # check if item was in alloc-ed list
-            idx = [x for x, y in gef.session.heap_allocated_chunks].index(self.ptr)
-            # if so pop it out
-            item = gef.session.heap_allocated_chunks.pop(idx)
-        except ValueError:
-            if is_debug():
-                warn(f"Chunk {self.ptr:#x} was not in tracking list")
-        finally:
-            # add new item to alloc-ed list
-            gef.session.heap_allocated_chunks.append(item)
-
-        return False
-
-
-class TraceFreeBreakpoint(gdb.Breakpoint):
-    """Track calls to free() and attempts to detect inconsistencies."""
-
-    def __init__(self) -> None:
-        super().__init__("__libc_free", gdb.BP_BREAKPOINT, internal=True)
-        self.silent = True
-        return
-
-    def stop(self) -> bool:
-        reset_all_caches()
-        _, addr = gef.arch.get_ith_parameter(0)
-        msg = []
-        check_free_null = gef.config["heap-analysis-helper.check_free_null"]
-        check_double_free = gef.config["heap-analysis-helper.check_double_free"]
-        check_weird_free = gef.config["heap-analysis-helper.check_weird_free"]
-        check_uaf = gef.config["heap-analysis-helper.check_uaf"]
-
-        ok(f"{Color.colorify('Heap-Analysis', 'yellow bold')} - free({addr:#x})")
-        if addr == 0:
-            if check_free_null:
-                msg.append(Color.colorify("Heap-Analysis", "yellow bold"))
-                msg.append(f"Attempting to free(NULL) at {gef.arch.pc:#x}")
-                msg.append("Reason: if NULL page is allocatable, this can lead to code execution.")
-                push_context_message("warn", "\n".join(msg))
-                return True
-            return False
-
-        if addr in [x for (x, y) in gef.session.heap_freed_chunks]:
-            if check_double_free:
-                msg.append(Color.colorify("Heap-Analysis", "yellow bold"))
-                msg.append(f"Double-free detected {RIGHT_ARROW} free({addr:#x}) is called at {gef.arch.pc:#x} but is already in the free-ed list")
-                msg.append("Execution will likely crash...")
-                push_context_message("warn", "\n".join(msg))
-                return True
-            return False
-
-        # if here, no error
-        # 1. move alloc-ed item to free list
-        try:
-            # pop from alloc-ed list
-            idx = [x for x, y in gef.session.heap_allocated_chunks].index(addr)
-            item = gef.session.heap_allocated_chunks.pop(idx)
-
-        except ValueError:
-            if check_weird_free:
-                msg.append(Color.colorify("Heap-Analysis", "yellow bold"))
-                msg.append("Heap inconsistency detected:")
-                msg.append(f"Attempting to free an unknown value: {addr:#x}")
-                push_context_message("warn", "\n".join(msg))
-                return True
-            return False
-
-        # 2. add it to free-ed list
-        gef.session.heap_freed_chunks.append(item)
-
-        self.retbp = None
-        if check_uaf:
-            # 3. (opt.) add a watchpoint on pointer
-            self.retbp = TraceFreeRetBreakpoint(addr)
-        return False
-
-
-class TraceFreeRetBreakpoint(gdb.FinishBreakpoint):
-    """Internal temporary breakpoint to track free()d values."""
-
-    def __init__(self, addr: int) -> None:
-        super().__init__(gdb.newest_frame(), internal=True)
-        self.silent = True
-        self.addr = addr
-        return
-
-    def stop(self) -> bool:
-        reset_all_caches()
-        wp = UafWatchpoint(self.addr)
-        gef.session.heap_uaf_watchpoints.append(wp)
-        return False
-
-
-class UafWatchpoint(gdb.Breakpoint):
-    """Custom watchpoints set TraceFreeBreakpoint() to monitor free()d pointers being used."""
-
-    def __init__(self, addr: int) -> None:
-        super().__init__(f"*{addr:#x}", gdb.BP_WATCHPOINT, internal=True)
-        self.address = addr
-        self.silent = True
-        self.enabled = True
-        return
-
-    def stop(self) -> bool:
-        """If this method is triggered, we likely have a UaF. Break the execution and report it."""
-        reset_all_caches()
-        frame = gdb.selected_frame()
-        if frame.name() in ("_int_malloc", "malloc_consolidate", "__libc_calloc", ):
-            return False
-
-        # software watchpoints stop after the next statement (see
-        # https://sourceware.org/gdb/onlinedocs/gdb/Set-Watchpoints.html)
-        pc = gdb_get_nth_previous_instruction_address(gef.arch.pc, 2)
-        insn = gef_current_instruction(pc)
-        msg = []
-        msg.append(Color.colorify("Heap-Analysis", "yellow bold"))
-        msg.append(f"Possible Use-after-Free in '{get_filepath()}': "
-                   f"pointer {self.address:#x} was freed, but is attempted to be used at {pc:#x}")
-        msg.append(f"{insn.address:#x}   {insn.mnemonic} {Color.yellowify(', '.join(insn.operands))}")
-        push_context_message("warn", "\n".join(msg))
-        return True
 
 
 class EntryBreakBreakpoint(gdb.Breakpoint):
@@ -3870,7 +3596,7 @@ class ScanSectionCommand(GenericCommand):
     _cmdline_ = "scan"
     _syntax_  = f"{_cmdline_} HAYSTACK NEEDLE"
     _aliases_ = ["lookup",]
-    _example_ = f"\n{_cmdline_} stack libc"
+    _example_ = f"\n{_cmdline_} stack"
 
     @only_if_gdb_running
     def do_invoke(self, argv: List[str]) -> None:
@@ -5009,7 +4735,7 @@ class ElfInfoCommand(GenericCommand):
 @register_command
 class EntryPointBreakCommand(GenericCommand):
     """Tries to find best entry point and sets a temporary breakpoint on it. The command will test for
-    well-known symbols for entry points, such as `main`, `_main`, `__libc_start_main`, etc. defined by
+    well-known symbols for entry points, such as `main`, `_main`, etc. defined by
     the setting `entrypoint_symbols`."""
 
     _cmdline_ = "entry-break"
@@ -5018,7 +4744,7 @@ class EntryPointBreakCommand(GenericCommand):
 
     def __init__(self) -> None:
         super().__init__()
-        self["entrypoint_symbols"] = ("main _main __libc_start_main __uClibc_main start _start", "Possible symbols for entry points")
+        self["entrypoint_symbols"] = ("main _main  start _start", "Possible symbols for entry points")
         return
 
     def do_invoke(self, argv: List[str]) -> None:
@@ -5144,8 +4870,6 @@ class ContextCommand(GenericCommand):
         self["clear_screen"] = (True, "Clear the screen before printing the context")
         self["layout"] = ("legend regs stack code args source memory threads trace extra", "Change the order/presence of the context sections")
         self["redirect"] = ("", "Redirect the context information to another TTY")
-        self["libc_args"] = (False, "Show libc function call args description")
-        self["libc_args_path"] = ("", "Path to libc function call args json files, provided via gef-extras")
 
         if "capstone" in list(sys.modules.keys()):
             self["use_capstone"] = (False, "Use capstone as disassembler in the code pane (instead of GDB)")
@@ -5513,10 +5237,6 @@ class ContextCommand(GenericCommand):
         _function_name = None
         if function_name.endswith("@plt"):
             _function_name = function_name.split("@")[0]
-            try:
-                nb_argument = len(gef.ui.libc_args_table[_arch_mode][_function_name])
-            except KeyError:
-                pass
 
         if not nb_argument:
             nb_argument = max([function_parameters.index(p)+1 for p in parameter_set], default=0)
@@ -5526,8 +5246,7 @@ class ContextCommand(GenericCommand):
             _key, _values = gef.arch.get_ith_parameter(i, in_func=False)
             _values = RIGHT_ARROW.join(dereference_from(_values))
             try:
-                args.append("{} = {} (def: {})".format(Color.colorify(_key, arg_key_color), _values,
-                                                       gef.ui.libc_args_table[_arch_mode][_function_name][_key]))
+                args.append("{} = {}".format(Color.colorify(_key, arg_key_color), _values))
             except KeyError:
                 args.append(f"{Color.colorify(_key, arg_key_color)} = {_values}")
 
@@ -6344,7 +6063,7 @@ class MMapCommand(GenericCommand):
 
     _cmdline_ = "mmap"
     _syntax_  = f"{_cmdline_} [FILTER]"
-    _example_ = f"{_cmdline_} libc"
+    _example_ = f"{_cmdline_} EWRAM"
 
     @only_if_gdb_running
     def do_invoke(self, argv: List[str]) -> None:
@@ -6408,7 +6127,7 @@ class XFilesCommand(GenericCommand):
 
     _cmdline_ = "xfiles"
     _syntax_  = f"{_cmdline_} [FILE [NAME]]"
-    _example_ = f"\n{_cmdline_} libc\n{_cmdline_} libc IO_vtables"
+    _example_ = f"\n{_cmdline_} cart.elf"
 
     @only_if_gdb_running
     def do_invoke(self, argv: List[str]) -> None:
@@ -7977,25 +7696,9 @@ class GefUiManager(GefManager):
         self.context_hidden = False
         self.stream_buffer : Optional[StringIO] = None
         self.highlight_table: Dict[str, str] = {}
-        self.libc_args_table: Dict[str, Dict[str, Dict[str, str]]] = {}
         self.watches: Dict[int, Tuple[int, str]] = {}
         self.context_messages: List[str] = []
         return
-
-
-class GefLibcManager(GefManager):
-    """Class managing everything libc-related (except heap)."""
-    def __init__(self) -> None:
-        self._version : Optional[Tuple[int, int]] = None
-        return
-
-    @property
-    def version(self) -> Optional[Tuple[int, int]]:
-        if not is_alive():
-            return None
-        if not self._version:
-            self._version = get_libc_version()
-        return self._version
 
 
 class Gef:
@@ -8006,7 +7709,6 @@ class Gef:
         self.arch: Architecture = GenericArchitecture() # see PR #516, will be reset by `new_objfile_handler`
         self.config = GefSettingsManager()
         self.ui = GefUiManager()
-        self.libc = GefLibcManager()
         return
 
     def reinitialize_managers(self) -> None:
