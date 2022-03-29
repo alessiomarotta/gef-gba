@@ -176,18 +176,14 @@ def reset_all_caches() -> None:
 def reset() -> None:
     global gef
 
-    arch = ARM()
     if gef:
         reset_all_caches()
-        arch = gef.arch
         del gef
 
     gef = Gef()
     gef.setup()
 
-    if arch:
-        gef.arch = arch
-    return
+    gef.arch = ARM()
 
 
 def highlight_text(text: str) -> str:
@@ -1612,9 +1608,6 @@ class Architecture(metaclass=abc.ABCMeta):
     def is_branch_taken(self, insn: Instruction) -> Tuple[bool, str]:         pass
     @abc.abstractmethod
     def get_ra(self, insn: Instruction, frame: "gdb.Frame") -> Optional[int]: pass
-    @classmethod
-    @abc.abstractmethod
-    def mprotect_asm(cls, addr: int, size: int, perm: Permission) -> str:     pass
 
     arch = ""
     mode = ""
@@ -1719,10 +1712,6 @@ class GenericArchitecture(Architecture):
     def is_conditional_branch(self, insn: Instruction) -> bool:               return False
     def is_branch_taken(self, insn: Instruction) -> Tuple[bool, str]:         return False, ""
     def get_ra(self, insn: Instruction, frame: "gdb.Frame") -> Optional[int]: return 0
-
-    @classmethod
-    def mprotect_asm(cls, addr: int, size: int, perm: Permission) -> str:
-        raise OSError(f"Architecture {cls.arch} not supported")
 
 
 @register_architecture
@@ -1850,23 +1839,6 @@ class ARM(Architecture):
         elif frame.older():
             ra = frame.older().pc()
         return ra
-
-    @classmethod
-    def mprotect_asm(cls, addr: int, size: int, perm: Permission) -> str:
-        _NR_mprotect = 125
-        insns = [
-            "push {r0-r2, r7}",
-            f"mov r1, {addr & 0xffff:d}",
-            f"mov r0, {(addr & 0xffff0000) >> 16:d}",
-            "lsl r0, r0, 16",
-            "add r0, r0, r1",
-            f"mov r1, {size & 0xffff:d}",
-            f"mov r2, {perm.value & 0xff:d}",
-            f"mov r7, {_NR_mprotect:d}",
-            "svc 0",
-            "pop {r0-r2, r7}",
-        ]
-        return "; ".join(insns)
 
 
 def copy_to_clipboard(data: str) -> None:
@@ -8107,7 +8079,7 @@ if __name__ == "__main__":
         "set history filename ~/.gdb_history",
         "set output-radix 0x10",
         "set print pretty on",
-        "set disassembly-flavor intel",
+        "set architecture armv4t",
         "handle SIGALRM print nopass",
     )
     for cmd in gdb_initial_settings:
