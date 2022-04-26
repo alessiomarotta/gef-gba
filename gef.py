@@ -5090,6 +5090,14 @@ class ContextCommand(GenericCommand):
         try:
             instruction_iterator = capstone_disassemble if use_capstone else gef_disassemble
 
+            if gef.arch.mode == "THUMB":
+                pc -= 1
+
+                # hack to avoid showing undefined instructions after a call in mGBA
+                prev_pc_instr = gef_get_instruction_at(pc-2)
+                if gef.arch.is_call(prev_pc_instr):
+                    pc -= 2
+
             for insn in instruction_iterator(pc, nb_insn, nb_prev=nb_insn_prev):
                 line = []
                 is_taken  = False
